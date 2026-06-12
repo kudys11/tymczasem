@@ -1,37 +1,12 @@
 cd /opt/_docker-compose/wspolnota
 
-cat > fix_2_8_1a_windykacja_host_container_rebuild.sh <<'SH'
-#!/usr/bin/env bash
-set -e
-
-patch_file () {
-  local ROOT="$1"
-
-  python3 - "$ROOT" <<'PY'
+python3 - <<'PY'
 from pathlib import Path
-import sys
 
-ROOT = Path(sys.argv[1])
-
-# =========================================================
-# 1. Numeracja spraw: WIND -> WMB28
-# =========================================================
-p = ROOT / "apps/audit/models.py"
+p = Path("apps/audit/admin_debt_cases_report.py")
 txt = p.read_text(encoding="utf-8")
 
-txt = txt.replace(
-    'self.case_number = f"WIND/{self.created_at.year}/{self.id:04d}"',
-    'year = self.created_at.year if self.created_at else self.report_date.year\n            self.case_number = f"WMB28/{year}/{self.id:04d}"'
-)
-
-p.write_text(txt, encoding="utf-8")
-
-# =========================================================
-# 2. Raport spraw windykacyjnych
-# =========================================================
-p = ROOT / "apps/audit/admin_debt_cases_report.py"
-txt = p.read_text(encoding="utf-8")
-
+# Helpery przeterminowania
 if "def _closed_statuses()" not in txt:
     txt = txt.replace(
 '''def _open_statuses():
@@ -52,8 +27,9 @@ def _is_overdue(case, today=None):
         and case.payment_deadline
         and case.payment_deadline < today
     )
-''', 1)
+''')
 
+# Filtr queryset
 txt = txt.replace(
 '''        if status_filter == "open":
             qs = qs.exclude(status__in=("paid", "closed", "cancelled"))
@@ -68,6 +44,7 @@ txt = txt.replace(
             qs = qs.filter(status=status_filter)
 ''')
 
+# Dashboard
 txt = txt.replace(
 '''        all_cases = list(DebtCollectionCase.objects.all())
         dashboard_open = len([x for x in all_cases if x.status in _open_statuses()])
@@ -103,6 +80,7 @@ txt = txt.replace(
         oldest_open_days = 0
 ''')
 
+# Badge po terminie w wierszu
 txt = txt.replace(
 '''    def row(x, index):
         return f\\'''
@@ -120,14 +98,16 @@ txt = txt.replace(
 '''          <td>{x.get_status_display()}{overdue_badge}</td>
 ''')
 
+# CSS
 if ".overdue{{" not in txt:
     txt = txt.replace(
 '''        .standard{{background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe}}
 ''',
 '''        .standard{{background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe}}
         .overdue{{display:inline-block;margin-top:4px;border-radius:999px;padding:3px 8px;background:#fef2f2;color:#dc2626;border:1px solid #fecaca;font-size:11px;font-weight:700}}
-''', 1)
+''')
 
+# Opcja filtra
 if 'value="overdue"' not in txt:
     txt = txt.replace(
 '''                <option value="open" {selected("open")}>Otwarte</option>
@@ -136,8 +116,9 @@ if 'value="overdue"' not in txt:
 '''                <option value="open" {selected("open")}>Otwarte</option>
                 <option value="overdue" {selected("overdue")}>Przeterminowane</option>
                 <option value="all" {selected("all")}>Wszystkie</option>
-''', 1)
+''')
 
+# Kafelki
 txt = txt.replace(
 '''        <div class="card">Spłacone<strong class="plus">{dashboard_paid}</strong></div>
         <div class="card">Kwota otwarta<strong class="minus">-{_money(dashboard_amount)}</strong></div>
@@ -153,8 +134,9 @@ if "Kwota otwartych spraw" not in txt:
         <div class="card">Kwota otwartych spraw<strong class="minus">-{_money(dashboard_amount)}</strong></div>
       </div>
 
-      <h2>Lista spraw</h2>''', 1)
+      <h2>Lista spraw</h2>''')
 
+# Notatka
 txt = txt.replace(
 '''      <p class="note">Akcje zmieniają status sprawy i automatycznie zapisują odpowiednie daty oraz wpis w notatkach sprawy.</p>
 ''',
@@ -162,60 +144,5 @@ txt = txt.replace(
 ''')
 
 p.write_text(txt, encoding="utf-8")
-
-print(f"OK: poprawiono {ROOT}")
+print("OK: raport spraw windykacyjnych poprawiony na hoście.")
 PY
-}
-
-echo "== 1. Poprawiam host =="
-patch_file "."
-
-echo "== 2. Poprawiam kontener, jeśli działa =="
-if docker compose ps web --status running | grep -q web; then
-  docker compose exec web bash -lc "python3 - <<'PY'
-from pathlib import Path
-
-# tylko szybka kontrola i poprawka numeracji w kontenerze przed rebuildem
-p = Path('/app/apps/audit/models.py')
-txt = p.read_text(encoding='utf-8')
-txt = txt.replace(
-    'self.case_number = f\"WIND/{self.created_at.year}/{self.id:04d}\"',
-    'year = self.created_at.year if self.created_at else self.report_date.year\\n            self.case_number = f\"WMB28/{year}/{self.id:04d}\"'
-)
-p.write_text(txt, encoding='utf-8')
-print('OK: kontener poprawiony tymczasowo')
-PY"
-fi
-
-echo "== 3. Rebuild =="
-docker compose down
-docker compose build --no-cache
-docker compose up -d
-
-echo "== 4. Czekam na start =="
-sleep 15
-
-echo "== 5. Check =="
-docker compose exec web python manage.py check
-
-echo "== 6. Uzupełniam puste/stare numery spraw =="
-docker compose exec web python manage.py shell -c "
-from apps.audit.models import DebtCollectionCase
-
-for x in DebtCollectionCase.objects.all():
-    if not x.case_number or x.case_number.startswith('WIND/'):
-        x.case_number = ''
-        x.save()
-
-print('OK')
-"
-
-echo "== 7. Kontrola =="
-docker compose exec web grep -n "WMB28" /app/apps/audit/models.py
-docker compose exec web grep -n "overdue\\|Przeterminowane\\|Najstarsza otwarta" /app/apps/audit/admin_debt_cases_report.py
-
-echo "GOTOWE: Etap 2.8.1a utrwalony na hoście i w kontenerze."
-SH
-
-chmod +x fix_2_8_1a_windykacja_host_container_rebuild.sh
-./fix_2_8_1a_windykacja_host_container_rebuild.sh
