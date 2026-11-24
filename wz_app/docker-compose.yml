@@ -1,0 +1,14 @@
+services:
+  wz:
+    build: .
+    container_name: wz-app
+    restart: unless-stopped
+    ports:
+      - "${WZ_PORT:-8457}:8000"
+    volumes:
+      - wz_data:/data
+    environment:
+      DATABASE_PATH: /data/wz.sqlite3
+      TZ: Europe/Warsaw
+volumes:
+  wz_data:
